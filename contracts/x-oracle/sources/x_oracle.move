@@ -11,6 +11,7 @@ use x_oracle::price_update_policy::{
     PriceUpdatePolicyCap,
     PriceUpdateRequest
 };
+use sui::vec_set::VecSet;
 
 const PRIMARY_PRICE_NOT_QUALIFIED: u64 = 720;
 const ONLY_SUPPORT_ONE_PRIMARY: u64 = 721;
@@ -31,9 +32,9 @@ public struct XOraclePolicyCap has key, store {
     secondary_price_update_policy_cap: PriceUpdatePolicyCap,
 }
 
-public struct XOraclePriceUpdateRequest<phantom T> {
-    primary_price_update_request: PriceUpdateRequest<T>,
-    secondary_price_update_request: PriceUpdateRequest<T>,
+public struct XOraclePriceUpdateRequest<phantom CoinType> {
+    primary_price_update_request: PriceUpdateRequest<CoinType>,
+    secondary_price_update_request: PriceUpdateRequest<CoinType>,
 }
 
 fun init(otw: X_ORACLE, ctx: &mut TxContext) {
@@ -131,11 +132,11 @@ public fun remove_secondary_price_update_rule<CoinType, Rule: drop>(
     );
 }
 
-public fun price_update_request<T>(self: &XOracle): XOraclePriceUpdateRequest<T> {
-    let primary_price_update_request = price_update_policy::new_request<T>(
+public fun price_update_request<CoinType>(self: &XOracle): XOraclePriceUpdateRequest<CoinType> {
+    let primary_price_update_request = price_update_policy::new_request<CoinType>(
         &self.primary_price_update_policy,
     );
-    let secondary_price_update_request = price_update_policy::new_request<T>(
+    let secondary_price_update_request = price_update_policy::new_request<CoinType>(
         &self.secondary_price_update_policy,
     );
     XOraclePriceUpdateRequest {
@@ -144,9 +145,9 @@ public fun price_update_request<T>(self: &XOracle): XOraclePriceUpdateRequest<T>
     }
 }
 
-public fun set_primary_price<T, Rule: drop>(
+public fun set_primary_price<CoinType, Rule: drop>(
     rule: Rule,
-    request: &mut XOraclePriceUpdateRequest<T>,
+    request: &mut XOraclePriceUpdateRequest<CoinType>,
     price_feed: PriceFeed,
 ) {
     price_update_policy::add_price_feed(
@@ -156,9 +157,9 @@ public fun set_primary_price<T, Rule: drop>(
     );
 }
 
-public fun set_secondary_price<T, Rule: drop>(
+public fun set_secondary_price<CoinType, Rule: drop>(
     rule: Rule,
-    request: &mut XOraclePriceUpdateRequest<T>,
+    request: &mut XOraclePriceUpdateRequest<CoinType>,
     price_feed: PriceFeed,
 ) {
     price_update_policy::add_price_feed(
@@ -168,9 +169,9 @@ public fun set_secondary_price<T, Rule: drop>(
     );
 }
 
-public fun confirm_price_update_request<T>(
+public fun confirm_price_update_request<CoinType>(
     self: &mut XOracle,
-    request: XOraclePriceUpdateRequest<T>,
+    request: XOraclePriceUpdateRequest<CoinType>,
     clock: &Clock,
 ) {
     let XOraclePriceUpdateRequest { primary_price_update_request, secondary_price_update_request } =
@@ -186,13 +187,13 @@ public fun confirm_price_update_request<T>(
         &self.secondary_price_update_policy,
     );
 
-    let coin_type = get<T>();
+    let coin_type = get<CoinType>();
     if (!table::contains(&self.prices, coin_type)) {
         table::add(&mut self.prices, coin_type, price_feed::new(0, 0));
     };
     let price_feed = determine_price(&mut primary_price_feeds, &mut secondary_price_feeds);
 
-    let current_price_feed = table::borrow_mut(&mut self.prices, get<T>());
+    let current_price_feed = table::borrow_mut(&mut self.prices, get<CoinType>());
 
     let now = clock::timestamp_ms(clock) / 1000;
     let new_price_feed = price_feed::new(
@@ -244,4 +245,14 @@ fun price_feed_match(price_feed1: PriceFeed, price_feed2: PriceFeed): bool {
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
     init( X_ORACLE {}, ctx)
+}
+
+#[test_only]
+public fun get_primary_price_update_policy<CoinType>(self: &mut XOracle): VecSet<TypeName> {
+    self.primary_price_update_policy.get_price_update_policy<CoinType>()
+}
+
+#[test_only]
+public fun get_secondary_price_update_policy<CoinType>(self: &mut XOracle): VecSet<TypeName> {
+    self.secondary_price_update_policy.get_price_update_policy<CoinType>()
 }
