@@ -1,10 +1,19 @@
 module x_oracle::x_oracle;
 
-use std::type_name::TypeName;
+use std::type_name::{TypeName, get};
+use sui::clock::{Self, Clock};
 use sui::package;
-use sui::table::Table;
-use x_oracle::price_feed::PriceFeed;
-use x_oracle::price_update_policy::{Self, PriceUpdatePolicy, PriceUpdatePolicyCap, PriceUpdateRequest};
+use sui::table::{Self, Table};
+use x_oracle::price_feed::{Self, PriceFeed};
+use x_oracle::price_update_policy::{
+    Self,
+    PriceUpdatePolicy,
+    PriceUpdatePolicyCap,
+    PriceUpdateRequest
+};
+
+const PRIMARY_PRICE_NOT_QUALIFIED: u64 = 720;
+const ONLY_SUPPORT_ONE_PRIMARY: u64 = 721;
 
 public struct X_ORACLE has drop {}
 
@@ -24,7 +33,7 @@ public struct XOraclePolicyCap has key, store {
 
 public struct XOraclePriceUpdateRequest<phantom T> {
     primary_price_update_request: PriceUpdateRequest<T>,
-    secondary_price_update_request: PriceUpdateRequest<T>
+    secondary_price_update_request: PriceUpdateRequest<T>,
 }
 
 fun init(otw: X_ORACLE, ctx: &mut TxContext) {
@@ -63,6 +72,8 @@ fun new(ctx: &mut TxContext): (XOracle, XOraclePolicyCap) {
     (x_oracle, x_oracle_update_policy)
 }
 
+public fun prices(self: &XOracle): &Table<TypeName, PriceFeed> { &self.prices }
+
 public fun init_rules_if_not_exist(
     policy_cap: &XOraclePolicyCap,
     x_oracle: &mut XOracle,
@@ -80,12 +91,157 @@ public fun init_rules_if_not_exist(
     );
 }
 
-public fun add_primary_price_update_rule<CoinType, Rule: drop>(self: &mut XOracle, cap: &XOraclePolicyCap) {
-    price_update_policy::add_rule(&mut self.primary_price_update_policy, &cap.primary_price_update_policy_cap);
+public fun add_primary_price_update_rule<CoinType, Rule: drop>(
+    self: &mut XOracle,
+    cap: &XOraclePolicyCap,
+) {
+    price_update_policy::add_rule<CoinType, Rule>(
+        &mut self.primary_price_update_policy,
+        &cap.primary_price_update_policy_cap,
+    );
 }
 
-public fun remove_primary_price_update_rule<Rule: drop>(self: &mut XOracle, cap: &XOraclePolicyCap) {
-    price_update_policy::remove_rule<Rule>(&mut self.primary_price_update_policy, &cap.primary_price_update_policy_cap);
+public fun remove_primary_price_update_rule<CoinType, Rule: drop>(
+    self: &mut XOracle,
+    cap: &XOraclePolicyCap,
+) {
+    price_update_policy::remove_rule<CoinType, Rule>(
+        &mut self.primary_price_update_policy,
+        &cap.primary_price_update_policy_cap,
+    );
 }
 
+public fun add_secondary_price_update_rule<CoinType, Rule: drop>(
+    self: &mut XOracle,
+    cap: &XOraclePolicyCap,
+) {
+    price_update_policy::add_rule<CoinType, Rule>(
+        &mut self.secondary_price_update_policy,
+        &cap.secondary_price_update_policy_cap,
+    );
+}
 
+public fun remove_secondary_price_update_rule<CoinType, Rule: drop>(
+    self: &mut XOracle,
+    cap: &XOraclePolicyCap,
+) {
+    price_update_policy::remove_rule<CoinType, Rule>(
+        &mut self.secondary_price_update_policy,
+        &cap.secondary_price_update_policy_cap,
+    );
+}
+
+public fun price_update_request<T>(self: &XOracle): XOraclePriceUpdateRequest<T> {
+    let primary_price_update_request = price_update_policy::new_request<T>(
+        &self.primary_price_update_policy,
+    );
+    let secondary_price_update_request = price_update_policy::new_request<T>(
+        &self.secondary_price_update_policy,
+    );
+    XOraclePriceUpdateRequest {
+        primary_price_update_request,
+        secondary_price_update_request,
+    }
+}
+
+public fun set_primary_price<T, Rule: drop>(
+    rule: Rule,
+    request: &mut XOraclePriceUpdateRequest<T>,
+    price_feed: PriceFeed,
+) {
+    price_update_policy::add_price_feed(
+        rule,
+        &mut request.primary_price_update_request,
+        price_feed,
+    );
+}
+
+public fun set_secondary_price<T, Rule: drop>(
+    rule: Rule,
+    request: &mut XOraclePriceUpdateRequest<T>,
+    price_feed: PriceFeed,
+) {
+    price_update_policy::add_price_feed(
+        rule,
+        &mut request.secondary_price_update_request,
+        price_feed,
+    );
+}
+
+public fun confirm_price_update_request<T>(
+    self: &mut XOracle,
+    request: XOraclePriceUpdateRequest<T>,
+    clock: &Clock,
+) {
+    let XOraclePriceUpdateRequest { primary_price_update_request, secondary_price_update_request } =
+        request;
+
+    let mut  primary_price_feeds = price_update_policy::confirm_request(
+        primary_price_update_request,
+        &self.primary_price_update_policy,
+    );
+
+    let mut secondary_price_feeds = price_update_policy::confirm_request(
+        secondary_price_update_request,
+        &self.secondary_price_update_policy,
+    );
+
+    let coin_type = get<T>();
+    if (!table::contains(&self.prices, coin_type)) {
+        table::add(&mut self.prices, coin_type, price_feed::new(0, 0));
+    };
+    let price_feed = determine_price(&mut primary_price_feeds, &mut secondary_price_feeds);
+
+    let current_price_feed = table::borrow_mut(&mut self.prices, get<T>());
+
+    let now = clock::timestamp_ms(clock) / 1000;
+    let new_price_feed = price_feed::new(
+        price_feed::value(&price_feed),
+        now,
+    );
+    *current_price_feed = new_price_feed;
+}
+
+fun determine_price(
+    primary_price_feeds: &mut vector<PriceFeed>,
+    secondary_price_feeds: &mut vector<PriceFeed>,
+): PriceFeed {
+    // current we only support one primary price feed
+    assert!(primary_price_feeds.length() == 1, ONLY_SUPPORT_ONE_PRIMARY);
+    let primary_price_feed = vector::pop_back( primary_price_feeds);
+    let secondary_price_feed_num = vector::length(secondary_price_feeds);
+
+    // We require the primary price feed to be confirmed by at least half of the secondary price feeds
+    let required_secondary_match_num = (secondary_price_feed_num + 1) / 2;
+    let mut matched: u64 = 0;
+    let mut i = 0;
+    while (i < secondary_price_feed_num) {
+        let secondary_price_feed = vector::pop_back( secondary_price_feeds);
+        if (price_feed_match(primary_price_feed, secondary_price_feed)) {
+            matched = matched + 1;
+        };
+        i = i + 1;
+    };
+    assert!(matched >= required_secondary_match_num, PRIMARY_PRICE_NOT_QUALIFIED);
+
+    // Use the primary price feed as the final price feed
+    primary_price_feed
+}
+
+// Check if two price feeds are within a reasonable range
+// If price_feed1 is within 1% away from price_feed2, then they are considered to be matched
+fun price_feed_match(price_feed1: PriceFeed, price_feed2: PriceFeed): bool {
+    let value1 = price_feed::value(&price_feed1);
+    let value2 = price_feed::value(&price_feed2);
+
+    let scale = 1000;
+    let reasonable_diff_percent = 1;
+    let reasonable_diff = reasonable_diff_percent * scale / 100;
+    let diff = value1 * scale / value2;
+    diff <= scale + reasonable_diff && diff >= scale - reasonable_diff
+}
+
+#[test_only]
+public fun init_for_testing(ctx: &mut TxContext) {
+    init( X_ORACLE {}, ctx)
+}
