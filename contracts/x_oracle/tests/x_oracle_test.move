@@ -93,6 +93,41 @@ fun test_primary() {
     ts::end(scenario);
 }
 
+#[
+    test,
+    expected_failure(
+        abort_code = x_oracle::price_update_policy::REQUIRE_ALL_RULES_FOLLOWED,
+        location = x_oracle::price_update_policy,
+    ),
+]
+fun test_primary_error_not_follow_rule() {
+    let mut scenario = ts::begin(ADMIN);
+
+    let (mut clock, mut x_oracle, x_oracle_policy_cap) = init_x_oracle(&mut scenario);
+
+    scenario.next_tx(ADMIN);
+    {
+        let ctx = ts::ctx(&mut scenario);
+        init_rules_if_not_exist(&x_oracle_policy_cap, &mut x_oracle, ctx);
+        clock::set_for_testing(&mut clock, 1000*1000);
+
+        add_primary_price_update_rule<SUI, PythRule>(&mut x_oracle, &x_oracle_policy_cap);
+
+        let request = price_update_request(&x_oracle);
+        confirm_price_update_request<SUI>(&mut x_oracle, request, &clock);
+
+        assert!(
+            uq32_32::int_mul(1, x_oracle::test_utils::get_price<SUI>(&x_oracle, &clock)) == 10,
+            0,
+        ); // check if the price accruately updated
+    };
+
+    test_utils::destroy(clock);
+    ts::return_to_address(ADMIN, x_oracle_policy_cap);
+    ts::return_shared(x_oracle);
+    ts::end(scenario);
+}
+
 #[test]
 fun test_primary_for_multiple_prices() {
     let mut scenario = ts::begin(ADMIN);
